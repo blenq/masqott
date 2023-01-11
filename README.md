@@ -17,7 +17,7 @@ from masqott import AppMessage, Client, Qos
 
 async def main():
     client = Client("localhost")
-    await client.connect("client_id", "user", "password")
+    await client.connect("client_id1", "user", "password")
     await client.publish(AppMessage("topic/12", "hello", qos=Qos.EXACTLY_ONCE))
     await client.disconnect()
         
@@ -32,7 +32,7 @@ from masqott import Client, Qos, SubscriptionRequest
 
 async def main():
     client = Client("localhost")
-    await client.connect("client_id", "user", "password")
+    await client.connect("client_id2", "user", "password")
     sub = await client.subscribe(
         SubscriptionRequest("topic/#", max_qos=Qos.EXACTLY_ONCE))
     msg = await client.get_message()

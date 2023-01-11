@@ -992,9 +992,9 @@ class BaseProtocol(BufferedProtocol):
 
     async def write(self, data: bytes) -> None:
         """ Sends data to the server. """
-        if self._transport is None or self._transport.is_closing():
-            raise ValueError("Connection is closed")
         if self._write_fut is not None:
             await self._write_fut
+        if self._transport is None:
+            return
         self._transport.write(data)
         self._last_sent = self._loop.time()
