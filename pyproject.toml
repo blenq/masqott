@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "masqott"
+description = "An asyncio MQTT client library"
+readme = "README.md"
+requires-python = ">=3.7"
+keywords = ["asyncio", "mqtt"]
+license = {text = "BSD 2-Clause License"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+]
+version = "0.1"
+
+[tool.setuptools]
+include-package-data = true
+packages = ['masqott']
+
+[tool.mypy]
+packages = ['masqott']
+strict = true
+
+[tool.pylint.format]
+max-module-lines = 1500
+
+[tool.pylint.design]
+max-public-methods = 25
