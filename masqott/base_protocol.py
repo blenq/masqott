@@ -870,7 +870,7 @@ properties = {
 
 # pylint: disable-next=too-many-instance-attributes
 class BaseProtocol(BufferedProtocol):
-    """ Base MQTT Protocoll class. """
+    """ Base MQTT Protocol class. """
 
     STANDARD_BUF_SIZE = 0x2000
 
