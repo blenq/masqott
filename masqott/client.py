@@ -22,7 +22,9 @@ from typing import (
 from .base_protocol import (
     BaseProtocol, PayloadFormat, Qos, MQTTVersion, PropertyID,
     PacketType, MalformedPacket, MessagePacker, UnPacker, RetainHandling,
-    ReasonCode, MQTTException, ProtocolError, get_mqtt_ex, verify_reason_code)
+    ReasonCode, MQTTException, ProtocolError, get_mqtt_ex, verify_reason_code,
+    default_packet_props,
+)
 from .utils import LogTextWrapper
 
 _logger = logging.getLogger(__name__)
@@ -473,7 +475,7 @@ class ClientProtocol(BaseProtocol):
             clean_start: bool,
             keep_alive: int,
             session_expiry_interval: int,
-            receive_max: Optional[int],
+            receive_max: int,
             max_packet_size: Optional[int],
             topic_alias_max: int,
             request_response_info: bool,
@@ -570,32 +572,40 @@ class ClientProtocol(BaseProtocol):
         self._session_present = bool(flags)
         reason_code = self.verify_reason_code(unpacker.read_byte())
         props = unpacker.read_props(PacketType.CONNACK)
-        self._subscription_id_available = props.get(
-            PropertyID.SUBSCRIPTION_ID_AVAILABLE, True)
-        self._supports_wildcards = props.get(
-            PropertyID.SUPPORTS_WILDCARDS, True)
-        self._server_topic_alias_max = props.get(PropertyID.TOPIC_ALIAS_MAX, 0)
-        client_id = props.get(PropertyID.ASSIGNED_CLIENT_ID)
-        if client_id is not None:
-            self._client_id = client_id
-        self._keep_alive = props.get(
-            PropertyID.SERVER_KEEP_ALIVE, self._keep_alive)
-        if self._keep_alive:
-            self._keep_alive_handle = self._loop.call_at(
-                self._last_sent + self._keep_alive,
-                self._process_keep_alive)
+
         unpacker.check_end()
         _logger.debug(
             "< CONNACK: client_id=%s reason_code=%s", self._client_id,
             reason_code.name)
+
+        self._subscription_id_available = props[
+            PropertyID.SUBSCRIPTION_ID_AVAILABLE]
+        self._supports_wildcards = props[PropertyID.SUPPORTS_WILDCARDS]
+        self._server_topic_alias_max = props[PropertyID.TOPIC_ALIAS_MAX]
+        assigned_client_id = props[PropertyID.ASSIGNED_CLIENT_ID]
+        if assigned_client_id is not None:
+            self._client_id = assigned_client_id
+
+        server_keep_alive = props[PropertyID.SERVER_KEEP_ALIVE]
+        if server_keep_alive:
+            self._keep_alive = server_keep_alive
+        if self._keep_alive:
+            self._keep_alive_handle = self._loop.call_at(
+                self._last_sent + self._keep_alive,
+                self._process_keep_alive)
+
         if reason_code.is_success:
             self._status = ClientStatus.CONNECTED
-            server_max_receive = props.get(PropertyID.RECEIVE_MAX, 4)
+            server_max_receive = props[PropertyID.RECEIVE_MAX]
+            if server_max_receive == 0:
+                raise get_mqtt_ex(
+                    ReasonCode.MALFORMED_PACKET,
+                    "Receive Maximum can not be 0")
             self._outstanding = Semaphore(server_max_receive)
             if not self._read_fut.done():
                 self._read_fut.set_result(None)
         elif not self._read_fut.done():
-            reason_string = props.get(PropertyID.REASON_STRING)
+            reason_string = props[PropertyID.REASON_STRING]
             self._read_fut.set_exception(
                 get_mqtt_ex(reason_code, reason_string))
 
@@ -690,8 +700,8 @@ class ClientProtocol(BaseProtocol):
         fut = self._packet_futs.pop(packet_id)
         if not fut.done():
             fut.set_result((
-                reason_codes, props.get(PropertyID.REASON_STRING),
-                props.get(PropertyID.USER_PROPS)))
+                reason_codes, props[PropertyID.REASON_STRING],
+                props[PropertyID.USER_PROPS]))
 
     def handle_suback_msg(self, unpacker: UnPacker) -> None:
         """ Handles a SUBACK message from the server. """
@@ -757,13 +767,13 @@ class ClientProtocol(BaseProtocol):
             if topic_alias is None:
                 # topic not aliased yet
                 num_aliases = len(self._server_topic_aliases)
-                if num_aliases == self._server_topic_alias_max:
+                if num_aliases < self._server_topic_alias_max:
+                    # Alias cache not full, add one. Alias can not be 0
+                    topic_alias = num_aliases + 1
+                else:
                     # alias map is full, remove oldest and use alias
                     topic_alias = self._server_topic_aliases.popitem(
                         last=False)[1]
-                else:
-                    # Alias cache not full, add one. Alias can not be 0
-                    topic_alias = num_aliases + 1
                 self._server_topic_aliases[topic] = topic_alias
             else:
                 # topic alias is already known on server
@@ -832,10 +842,10 @@ class ClientProtocol(BaseProtocol):
             reason_code_val = unpacker.read_byte()
             reason_code = self.verify_reason_code(reason_code_val)
         if unpacker.at_end():
-            props = {}
+            props = default_packet_props[packet_type]
         else:
             props = unpacker.read_props(packet_type)
-        reason_string = props.get(PropertyID.REASON_STRING)
+        reason_string = props[PropertyID.REASON_STRING]
         # user_props = props.get(PropertyID.USER_PROPS)
         _logger.debug(
             "< %s: reason_code=%s packet_id=%s", packet_type.name,
@@ -862,12 +872,12 @@ class ClientProtocol(BaseProtocol):
         packet_id = unpacker.read_int2()
         if unpacker.at_end():
             reason_code = ReasonCode.SUCCESS
-            props: MessageProps = {}
+            props = default_packet_props[PacketType.PUBREC]
         else:
             reason_code_val = unpacker.read_byte()
             reason_code = self.verify_reason_code(reason_code_val)
             if unpacker.at_end():
-                props = {}
+                props = default_packet_props[PacketType.PUBREC]
             else:
                 props = unpacker.read_props(PacketType.PUBREC)
 
@@ -893,7 +903,7 @@ class ClientProtocol(BaseProtocol):
             fut = self._release_fut(packet_id)
             if fut is None or fut.done():
                 return
-            reason_string = props.get(PropertyID.REASON_STRING)
+            reason_string = props[PropertyID.REASON_STRING]
             fut.set_exception(get_mqtt_ex(reason_code, reason_string))
 
     def handle_pubcomp_msg(self, unpacker: UnPacker) -> None:
@@ -922,7 +932,7 @@ class ClientProtocol(BaseProtocol):
             topic: str,
     ) -> str:
         """ Handles topic alias logic for incoming messages. """
-        topic_alias = props.get(PropertyID.TOPIC_ALIAS)
+        topic_alias = props[PropertyID.TOPIC_ALIAS]
         if topic_alias is not None:
             if topic:
                 # Server is setting alias for topic
@@ -954,16 +964,14 @@ class ClientProtocol(BaseProtocol):
         return AppMessage(
             topic,
             payload,
-            publish_props.get(
-                PropertyID.PAYLOAD_FORMAT_INDICATOR,
-                PayloadFormat.UNSPECIFIED),
+            publish_props[PropertyID.PAYLOAD_FORMAT_INDICATOR],
             qos,
-            publish_props.get(PropertyID.MESSAGE_EXPIRY_INTERVAL, None),
-            publish_props.get(PropertyID.RESPONSE_TOPIC),
-            publish_props.get(PropertyID.CORRELATION_DATA),
-            publish_props.get(PropertyID.USER_PROPS),
-            publish_props.get(PropertyID.SUBSCRIPTION_ID),
-            publish_props.get(PropertyID.CONTENT_TYPE),
+            publish_props[PropertyID.MESSAGE_EXPIRY_INTERVAL],
+            publish_props[PropertyID.RESPONSE_TOPIC],
+            publish_props[PropertyID.CORRELATION_DATA],
+            publish_props[PropertyID.USER_PROPS],
+            publish_props[PropertyID.SUBSCRIPTION_ID],
+            publish_props[PropertyID.CONTENT_TYPE],
             retain,
             duplicate
         ), packet_id
@@ -1028,7 +1036,7 @@ class ClientProtocol(BaseProtocol):
                 ReasonCode.MALFORMED_PACKET, "Invalid flags for disconnect.")
         if unpacker.buf_len == 0:
             reason_code = ReasonCode.NORMAL_DISCONNECT
-            props: MessageProps = {}
+            props = default_packet_props[PacketType.DISCONNECT]
         else:
             reason_code_byte = unpacker.read_byte()
             if reason_code_byte == 0:
@@ -1036,14 +1044,14 @@ class ClientProtocol(BaseProtocol):
             else:
                 reason_code = ReasonCode(reason_code_byte)
             if unpacker.buf_len == 1:
-                props = {}
+                props = default_packet_props[PacketType.DISCONNECT]
             else:
                 props = unpacker.read_props(PacketType.DISCONNECT)
         unpacker.check_end()
         _logger.debug("< DISCONNECT: reason_code=%s", reason_code.name)
 
         if self._packet_futs:
-            reason_string = props.get(PropertyID.REASON_STRING)
+            reason_string = props[PropertyID.REASON_STRING]
             exc = get_mqtt_ex(reason_code, reason_string)
             for fut in self._packet_futs.values():
                 if not fut.done():
@@ -1156,7 +1164,7 @@ class Client:
             clean_start: bool = False,
             keep_alive: int = 0,
             session_expiry_interval: int = 0,
-            receive_max: Optional[int] = None,
+            receive_max: int = 65535,
             max_packet_size: Optional[int] = None,
             topic_alias_max: int = 20,
             request_response_info: bool = False,

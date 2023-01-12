@@ -381,7 +381,7 @@ class UnPacker:
     """ Class to unpack a binary message. """
 
     def __init__(self, buf: memoryview) -> None:
-        self.buf: memoryview = buf
+        self.buf = buf
         self.buf_len = len(buf)
         self.pos = 0
 
@@ -490,7 +490,6 @@ class UnPacker:
 
     def read_props(self, packet_type: PacketType) -> Dict[PropertyID, Any]:
         """ Reads properties """
-
         props = {}
         props_len = self.read_var_int()
         end = self.pos + props_len
@@ -532,7 +531,8 @@ class UnPacker:
                 if prop_id not in props:
                     props[prop_id] = []
                 props[prop_id].append(prop_value)
-        return props
+
+        return {**default_packet_props[packet_type], **props}
 
     def at_end(self) -> bool:
         """ Indicates if the reader is at the end of the buffer. """
@@ -798,7 +798,7 @@ properties = {
         UnPacker.read_int2,
         Packer.write_int2,
         True,
-        None,
+        65535,
         {PacketType.CONNECT, PacketType.CONNACK},
     ),
     PropertyID.TOPIC_ALIAS_MAX: PropertyInfo(
@@ -863,6 +863,19 @@ properties = {
         {PacketType.CONNACK},
     ),
 }
+
+
+def get_default_packet_props() -> Dict[PacketType, Dict[PropertyID, Any]]:
+    """ Get default properties for all packet types. """
+    default_props: Dict[PacketType, Dict[PropertyID, Any]] = {
+        packet_type: {} for packet_type in PacketType.__members__.values()}
+    for prop_id, prop_info in properties.items():
+        for packet_type in prop_info.packet_types:
+            default_props[packet_type][prop_id] = prop_info.default
+    return default_props
+
+
+default_packet_props = get_default_packet_props()
 
 
 # ===== Base Asyncio Protocol Class ===========================================
