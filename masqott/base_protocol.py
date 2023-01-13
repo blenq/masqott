@@ -585,14 +585,12 @@ class Packer:
 
     def write_bytes(self, value: bytes) -> None:
         """ Write a binary value, prepended with the length. """
-        value = bytes(value)
         len_val = len(value)
-        self.write_int2(len(value))
+        self.write_int2(len_val)
         self._write_single_val(f"{len_val}s", value, len_val)
 
     def write_string(self, value: str) -> None:
         """ Write a string, prepended with the length. """
-        value = str(value)
         check_valid_string(value)
         self.write_bytes(value.encode())
 
@@ -931,16 +929,10 @@ class BaseProtocol(BufferedProtocol):
                 # read first byte
                 byte1 = self._standard_buf[msg_start]
                 self._flags = byte1 % 16
-                try:
-                    self._packet_type = PacketType(byte1 - self._flags)
-                except ValueError as ex:
+                self._packet_type = PacketType(byte1 - self._flags)
+                if self._packet_type is PacketType.RESERVED:
                     raise get_mqtt_ex(
-                        ReasonCode.PROTOCOL_ERROR, "Unknown packet type"
-                    ) from ex
-                if self._packet_type == PacketType.RESERVED:
-                    raise get_mqtt_ex(
-                        ReasonCode.PROTOCOL_ERROR, "Reserved packet"
-                    )
+                        ReasonCode.PROTOCOL_ERROR, "Reserved packet")
 
                 # set up for reading remaining length
                 self._vb_int = VariableByteIntReader()

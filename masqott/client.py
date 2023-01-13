@@ -62,65 +62,21 @@ class SubscriptionRequest:
         self.retain_handling = RetainHandling(self.retain_handling)
 
 
+@dataclass
 class Subscription:
     """ Subscription """
 
-    # pylint: disable-next=too-many-arguments
-    def __init__(
-            self,
-            topic_filter: str,
-            qos: Qos,
-            subscription_id: Optional[int],
-            no_local: bool,
-            retain_as_published: bool,
-            retain_handling: RetainHandling,
-            client: 'Client',
-    ) -> None:
-        self._topic_filter = topic_filter
-        self._qos = qos
-        self._subscription_id = subscription_id
-        self._no_local = no_local
-        self._retain_as_published = retain_as_published
-        self._retain_handling = retain_handling
-        self._client = client
+    topic_filter: str
+    qos: Qos
+    subscription_id: Optional[int]
+    no_local: bool
+    retain_as_published: bool
+    retain_handling: RetainHandling
+    _client: 'Client'
 
     async def unsubscribe(self) -> ReasonCode:
         """ Unsubscribes from the topic. """
-        return await self._client.unsubscribe(self._topic_filter)
-
-    @property
-    def topic_filter(self) -> str:
-        """ The topic filter. """
-        return self._topic_filter
-
-    @property
-    def qos(self) -> Qos:
-        """ Qos of the service. """
-        return self._qos
-
-    @property
-    def subscription_id(self) -> Optional[int]:
-        """ The subscription id if set. """
-        return self._subscription_id
-
-    @property
-    def no_local(self) -> bool:
-        """ Indicates if messages originating from itself should be returned
-        by the server.
-        """
-        return self._no_local
-
-    @property
-    def retain_as_published(self) -> bool:
-        """ Indicates if the retain flag of an application message should be
-        propagated to the client.
-        """
-        return self._retain_as_published
-
-    @property
-    def retain_handling(self) -> RetainHandling:
-        """ The retain behaviour option of the subscription. """
-        return self._retain_handling
+        return await self._client.unsubscribe(self.topic_filter)
 
 
 # pylint: disable-next=too-many-instance-attributes
@@ -776,7 +732,7 @@ class ClientProtocol(BaseProtocol):
                         last=False)[1]
                 self._server_topic_aliases[topic] = topic_alias
             else:
-                # topic alias is already known on server
+                # Topic alias is already known on server.
                 topic = ""
         else:
             topic_alias = None
