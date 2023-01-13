@@ -916,6 +916,29 @@ class BaseProtocol(BufferedProtocol):
             buf = buf[self._bytes_read:]
         return buf
 
+    _packet_flags: Dict[PacketType, int] = {
+        PacketType.CONNACK: 0,
+        PacketType.UNSUBACK: 0,
+        PacketType.SUBACK: 0,
+        PacketType.PINGRESP: 0,
+        PacketType.PUBACK: 0,
+        PacketType.PUBREC: 0,
+        PacketType.PUBCOMP: 0,
+        PacketType.PUBREL: 2,
+        PacketType.DISCONNECT: 0,
+    }
+
+    def verify_flags(self) -> None:
+        """ Verify flag value. """
+        expected_flags = self._packet_flags.get(self._packet_type)
+        if expected_flags is None:
+            return
+        if self._flags != expected_flags:
+            raise get_mqtt_ex(
+                ReasonCode.MALFORMED_PACKET,
+                f"Invalid fixed header flags '{self._flags}' for packet type "
+                f"{self._packet_type.name}")
+
     def buffer_updated(self, nbytes: int) -> None:
         """Data is received"""
 
@@ -933,7 +956,8 @@ class BaseProtocol(BufferedProtocol):
                 self._packet_type = PacketType(byte1 - self._flags)
                 if self._packet_type is PacketType.RESERVED:
                     raise get_mqtt_ex(
-                        ReasonCode.PROTOCOL_ERROR, "Reserved packet")
+                        ReasonCode.MALFORMED_PACKET, "Reserved packet")
+                self.verify_flags()
 
                 # set up for reading remaining length
                 self._vb_int = VariableByteIntReader()

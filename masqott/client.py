@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 """ Asyncio MQTT client implementation"""
-
 from asyncio import (
     CancelledError, create_task, Future, get_event_loop, Queue, Semaphore,
     TimerHandle, Task, Transport, wait_for)
@@ -17,7 +16,6 @@ import sys
 from typing import (
     Any, Coroutine, Dict, List, NamedTuple, Optional, overload, Set, Tuple,
     Union)
-
 
 from .base_protocol import (
     BaseProtocol, PayloadFormat, Qos, MQTTVersion, PropertyID,
@@ -134,7 +132,7 @@ class WillInfo(NamedTuple):
 def make_connect_message(
         version: MQTTVersion,
         client_id: str,
-        username: Optional[str],
+        user: Optional[str],
         password: Optional[Union[str, bytes]],
         clean_start: bool,
         keep_alive: int,
@@ -156,7 +154,7 @@ def make_connect_message(
     packer.write_byte(version)  # protocol version
 
     # write connect flags
-    if username is None:
+    if user is None:
         flags = 0
     else:
         flags = 128
@@ -217,9 +215,9 @@ def make_connect_message(
         # will payload
         packer.write_bytes(will_info.message.raw_payload)
 
-    # username
-    if username is not None:
-        packer.write_string(username)
+    # user
+    if user is not None:
+        packer.write_string(user)
 
     # password
     if password is not None:
@@ -343,7 +341,7 @@ class ClientProtocol(BaseProtocol):
             self,
             version: MQTTVersion,
             client_id: str,
-            username: Optional[str],
+            user: Optional[str],
             password: Optional[Union[str, bytes]],
             clean_start: bool,
             keep_alive: int,
@@ -369,7 +367,7 @@ class ClientProtocol(BaseProtocol):
         self._client_id = client_id
 
         connect_msg = make_connect_message(
-            version, client_id, username, password, clean_start, keep_alive,
+            version, client_id, user, password, clean_start, keep_alive,
             session_expiry_interval, receive_max, max_packet_size,
             topic_alias_max, request_response_info, request_problem_info,
             user_props, auth_method, auth_data, will_info
@@ -379,7 +377,7 @@ class ClientProtocol(BaseProtocol):
         self._read_fut = self._loop.create_future()
         self._status = ClientStatus.CONNECTING
         _logger.debug(
-            "> CONNECT: client_id=%s, username=%s", client_id, username or "")
+            "> CONNECT: client_id=%s, user=%s", client_id, user or "")
         await self.write(connect_msg)
 
         # wait for CONNACK
@@ -413,8 +411,6 @@ class ClientProtocol(BaseProtocol):
 
     def handle_pingresp_msg(self, unpacker: UnPacker) -> None:
         """ Handle an incoming PINGRESP message. """
-        if self._flags != 0:
-            raise MalformedPacket("Invalid flags for PINGRESP message.")
         _logger.debug("< PINGRESP")
         unpacker.check_end()
 
@@ -431,10 +427,6 @@ class ClientProtocol(BaseProtocol):
 
         if self._status != ClientStatus.CONNECTING:
             raise ValueError("Invalid message for state.")
-        if self._flags != 0:
-            raise MalformedPacket(
-                ReasonCode.MALFORMED_PACKET,
-                "Invalid fixed header flags for CONNACK message.")
 
         flags = unpacker.read_byte()
         if flags > 1:
@@ -555,9 +547,6 @@ class ClientProtocol(BaseProtocol):
             self, unpacker: UnPacker, packet_type: PacketType) -> None:
         """ Handles a SUBACK or UNSUBACK message from the server. """
 
-        if self._flags != 0:
-            raise MalformedPacket(
-                ReasonCode.MALFORMED_PACKET, "Invalid flag value for suback.")
         packet_id = unpacker.read_int2()
         props = unpacker.read_props(packet_type)
         reason_codes = []
@@ -703,9 +692,6 @@ class ClientProtocol(BaseProtocol):
     def _handle_puback_comp_msg(
             self, unpacker: UnPacker, packet_type: PacketType) -> None:
         """ Handles an incoming PUBACK or PUBCOMP message from the server. """
-        if self._flags != 0:
-            raise MalformedPacket(
-                ReasonCode.MALFORMED_PACKET, "Invalid flags.")
         packet_id = unpacker.read_int2()
         if unpacker.at_end():
             reason_code = ReasonCode.SUCCESS
@@ -736,10 +722,6 @@ class ClientProtocol(BaseProtocol):
     def handle_pubrec_msg(self, unpacker: UnPacker) -> None:
         """ Handles an incoming PUBREC message from the server. """
 
-        if self._flags != 0:
-            raise MalformedPacket(
-                ReasonCode.MALFORMED_PACKET,
-                "Invalid flags for PUBREC message.")
         packet_id = unpacker.read_int2()
         if unpacker.at_end():
             reason_code = ReasonCode.SUCCESS
@@ -814,7 +796,7 @@ class ClientProtocol(BaseProtocol):
                     if topic_alias == 0:
                         raise get_mqtt_ex(
                             ReasonCode.INVALID_TOPIC_ALIAS,
-                            f"Topic alias can not be zero.")
+                            "Topic alias can not be zero.")
                     if topic_alias > self._client_topic_alias_max:
                         raise get_mqtt_ex(
                             ReasonCode.INVALID_TOPIC_ALIAS,
@@ -886,10 +868,6 @@ class ClientProtocol(BaseProtocol):
     def handle_pubrel_msg(self, unpacker: UnPacker) -> None:
         """ Handles an incoming PUBREL message from the server. """
 
-        if self._flags != 2:
-            raise get_mqtt_ex(
-                ReasonCode.MALFORMED_PACKET,
-                "Invalid flags for PUBREL message")
         packet_id = unpacker.read_int2()
         if unpacker.at_end():
             reason_code = ReasonCode.SUCCESS
@@ -913,9 +891,6 @@ class ClientProtocol(BaseProtocol):
     def handle_disconnect_msg(self, unpacker: UnPacker) -> None:
         """ Handles an incoming DISCONNECT message from the server. """
 
-        if self._flags != 0:
-            raise MalformedPacket(
-                ReasonCode.MALFORMED_PACKET, "Invalid flags for disconnect.")
         if unpacker.buf_len == 0:
             reason_code = ReasonCode.NORMAL_DISCONNECT
             props = default_packet_props[PacketType.DISCONNECT]
@@ -1004,45 +979,34 @@ SubscriptionRequestArg = Union[
     str, SubscriptionRequest, Tuple[Any]]
 
 
+# pylint: disable-next=too-many-instance-attributes
 class Client:
     """ Asyncio MQTT client class. """
 
-    # pylint: disable-next=too-many-arguments
+    # pylint: disable-next=too-many-arguments,too-many-locals
     def __init__(
             self,
+
+            # Asyncio server base params
             host: str,
             port: Optional[int] = None,
+
+            # MQTT base params
+            client_id: str = "",
+            user: Optional[str] = None,
+            password: Optional[Union[str, bytes]] = None,
+
+            *,
+
+            # Asyncio server params
             ssl: Union[bool, SSLContext, None] = None,
             family: int = 0,
             local_addr: Optional[Tuple[str, int]] = None,
             server_hostname: Optional[str] = None,
             ssl_handshake_timeout: Optional[float] = None,
             ssl_shutdown_timeout: Optional[float] = None,
-    ):
-        self._client_id = ""
-        self._host = host
-        self._port = port if port else (8883 if ssl else 1883)
-        self._conn_params = {
-            "ssl": ssl,
-            "family": family,
-            "proto": socket.IPPROTO_TCP,
-            "local_addr": local_addr,
-            "server_hostname": server_hostname,
-            "ssl_handshake_timeout": ssl_handshake_timeout,
-        }
-        if _has_ssl_shutdown_timeout:
-            self._conn_params["ssl_shutdown_timeout"] = ssl_shutdown_timeout
-        self._loop = get_event_loop()
-        self._protocol: Optional[ClientProtocol] = None
-        self._msq_queue: 'Queue[AppMessage]' = Queue()
 
-    # pylint: disable-next=too-many-locals
-    async def connect(
-            self,
-            client_id: str = "",
-            user_name: Optional[str] = None,
-            password: Optional[Union[str, bytes]] = None,
-            *,
+            # MQTT params
             clean_start: bool = False,
             keep_alive: int = 0,
             session_expiry_interval: int = 0,
@@ -1055,16 +1019,40 @@ class Client:
             auth_method: Optional[str] = None,
             auth_data: Optional[bytes] = None,
             will_info: Optional[WillInfo] = None,
-    ) -> None:
-        """ Connects to the server. """
-        self._protocol = (await self._loop.create_connection(
-            self._create_protocol, self._host, self._port,
-            **self._conn_params))[1]  # type: ignore[arg-type]
-        await self._protocol.connect(
-            MQTTVersion.V5, client_id, user_name, password, clean_start,
+    ):
+        self._client_id = client_id
+        self._host = host
+        self._port = port if port else (8883 if ssl else 1883)
+        self._conn_params = {
+            "ssl": ssl,
+            "family": family,
+            "proto": socket.IPPROTO_TCP,
+            "local_addr": local_addr,
+            "server_hostname": server_hostname,
+            "ssl_handshake_timeout": ssl_handshake_timeout,
+        }
+        if _has_ssl_shutdown_timeout:
+            self._conn_params["ssl_shutdown_timeout"] = ssl_shutdown_timeout
+        self._mqtt_params: Tuple[
+                MQTTVersion, str, Optional[str], Optional[Union[str, bytes]],
+                bool, int, int, int, Optional[int], int, bool, bool,
+                Optional[UserProps], Optional[str], Optional[bytes],
+                Optional[WillInfo]
+        ] = (
+            MQTTVersion.V5, client_id, user, password, clean_start,
             keep_alive, session_expiry_interval, receive_max, max_packet_size,
             topic_alias_max, request_response_info, request_problem_info,
             user_props, auth_method, auth_data, will_info)
+        self._loop = get_event_loop()
+        self._protocol: Optional[ClientProtocol] = None
+        self._msq_queue: 'Queue[AppMessage]' = Queue()
+
+    async def connect(self) -> None:
+        """ Connects to the server. """
+        self._protocol = (await self._loop.create_connection(
+            self._create_protocol, self._host, self._port,
+            **self._conn_params))[1]  # type: ignore
+        await self._protocol.connect(*self._mqtt_params)
         self._client_id = self._protocol.client_id
 
     def _create_protocol(self) -> ClientProtocol:

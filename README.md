@@ -16,8 +16,9 @@ import asyncio
 from masqott import AppMessage, Client, Qos
 
 async def main():
-    client = Client("localhost")
-    await client.connect("client_id1", "user", "password")
+    client = Client(
+        "localhost", client_id="client1", user="user", password="password")
+    await client.connect()
     await client.publish(AppMessage("topic/12", "hello", qos=Qos.EXACTLY_ONCE))
     await client.disconnect()
         
@@ -31,8 +32,9 @@ import asyncio
 from masqott import Client, Qos, SubscriptionRequest
 
 async def main():
-    client = Client("localhost")
-    await client.connect("client_id2", "user", "password")
+    client = Client(
+        "localhost", client_id="client2", user="user", password="password")
+    await client.connect()
     sub = await client.subscribe(
         SubscriptionRequest("topic/#", max_qos=Qos.EXACTLY_ONCE))
     msg = await client.get_message()

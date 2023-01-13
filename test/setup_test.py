@@ -18,8 +18,10 @@ class BaseClientTestCase(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         client = Client(
             get_from_env("host", "localhost"),
-            int(get_from_env("port", "1883")))
-        await client.connect("test_client")
+            int(get_from_env("port", "1883")),
+            client_id="test_client"
+        )
+        await client.connect()
         self._cn = client
 
     async def asyncTearDown(self) -> None:
