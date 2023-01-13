@@ -318,6 +318,7 @@ def get_mqtt_ex(
         ReasonCode.SHARED_SUBS_NOT_SUPPORTED,
         ReasonCode.SUBSCRIPTION_ID_NOT_SUPPORTED,
         ReasonCode.WILDCARD_SUBS_NOT_SUPPORTED,
+        ReasonCode.INVALID_TOPIC_ALIAS,
     }:
         ex_class = ProtocolError
     else:
