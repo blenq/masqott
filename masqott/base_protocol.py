@@ -3,14 +3,14 @@
 """ Base functionality for asyncio MQTT protocol. """
 
 import asyncio
-from asyncio import BufferedProtocol, Transport
+from asyncio import BufferedProtocol, Transport, Event
 from codecs import decode
 import enum
 from functools import lru_cache
 import struct
 from typing import (
-    Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple,
-    Type, Union)
+    Any, Callable, Dict, Generator, Iterable, List, NamedTuple, Optional, Set,
+    Tuple, Type, Union)
 
 
 # ==== Protocol enums =========================================================
@@ -211,10 +211,13 @@ def verify_reason_code(
         reason_code = ReasonCode(reason_code_val)
     except ValueError as ex:
         raise get_mqtt_ex(
-            ReasonCode.MALFORMED_PACKET, "Invalid reason code.") from ex
+            ReasonCode.MALFORMED_PACKET,
+            f"Invalid reason code: {reason_code_val}.") from ex
     if reason_code not in packet_reason_codes[packet_type]:
         raise get_mqtt_ex(
-            ReasonCode.PROTOCOL_ERROR, "Invalid reason code for packet."
+            ReasonCode.PROTOCOL_ERROR,
+            f"Invalid reason code '{reason_code.name}' for {packet_type.name} "
+            "packet ."
         )
     return reason_code
 
@@ -353,29 +356,30 @@ def check_valid_string(value: str) -> None:
     )
 
 
-# pylint: disable-next=too-few-public-methods
-class VariableByteIntReader:
-    """ Helper class to read variable byte integers. """
-    # class to read a variable byte integer per byte
+MAX_MULTIPLIER = 128**3
 
-    MAX_MULTIPLIER = 128**3
 
-    def __init__(self) -> None:
-        self._value = 0
-        self._multiplier = 1
+def variable_byte_int_reader() -> Generator[Optional[int], int, None]:
+    """ Generator to read variable byte integer. """
 
-    def feed(self, value: int) -> Union[None, int]:
-        """ Feed a byte value to the parser. """
-        self._value += (value & 0x7F) * self._multiplier
-        if value & 0x80:
-            if self._multiplier == self.MAX_MULTIPLIER:
-                raise MalformedPacket(
-                    ReasonCode.MALFORMED_PACKET,
-                    "Invalid variable byte integer.",
-                )
-            self._multiplier *= 128
-            return None
-        return self._value
+    def _reader() -> Generator[Optional[int], int, None]:
+        value = 0
+        multiplier = 1
+        while True:
+            byte_val = yield None
+            value += (byte_val % 0x80) * multiplier
+            if byte_val < 0x80:
+                yield value
+            else:
+                if multiplier == MAX_MULTIPLIER:
+                    raise MalformedPacket(
+                        ReasonCode.MALFORMED_PACKET,
+                        "Invalid variable byte integer.",
+                    )
+                multiplier *= 128
+    reader = _reader()
+    next(reader)  # kickstart generator
+    return reader
 
 
 class UnPacker:
@@ -482,12 +486,12 @@ class UnPacker:
 
     def read_var_int(self) -> int:
         """ Reads a variable byte integer. """
-        reader = VariableByteIntReader()
-        value = None
-        while value is None:
-            byte_val = self.read_byte()
-            value = reader.feed(byte_val)
-        return value
+        reader = variable_byte_int_reader()
+        while True:
+            value = reader.send(self.read_byte())
+            if value is not None:
+                reader.close()
+                return value
 
     def read_props(self, packet_type: PacketType) -> Dict[PropertyID, Any]:
         """ Reads properties """
@@ -643,6 +647,23 @@ class Packer:
         return "".join(self.fmt_parts)
 
 
+_packet_flags: Dict[PacketType, int] = {
+    PacketType.CONNECT: 0,
+    PacketType.CONNACK: 0,
+    PacketType.UNSUBACK: 0,
+    PacketType.SUBACK: 0,
+    PacketType.PINGRESP: 0,
+    PacketType.PINGREQ: 0,
+    PacketType.PUBACK: 0,
+    PacketType.PUBREC: 0,
+    PacketType.PUBCOMP: 0,
+    PacketType.PUBREL: 2,
+    PacketType.SUBSCRIBE: 2,
+    PacketType.UNSUBSCRIBE: 2,
+    PacketType.DISCONNECT: 0,
+}
+
+
 class MessagePacker(Packer):
     """MQTT Message packer
 
@@ -650,9 +671,13 @@ class MessagePacker(Packer):
     over the network.
 
     """
-    def __init__(self, packet_type: PacketType, flags: int) -> None:
+    def __init__(
+            self, packet_type: PacketType, flags: Optional[int] = None
+    ) -> None:
         super().__init__()
         self.packet_type = packet_type
+        if flags is None:
+            flags = _packet_flags[packet_type]
         self.flags = flags
 
     def __bytes__(self) -> bytes:
@@ -895,11 +920,18 @@ class BaseProtocol(BufferedProtocol):
         self._msg_part_len = 1
         self._packet_type = PacketType.RESERVED
         self._flags = 0
-        self._vb_int: Optional[VariableByteIntReader] = None
+        self._vb_int: Optional[Generator[Optional[int], int, None]] = None
         self._transport: Optional[Transport] = None
-        self._write_fut = None
+        self._writing_enabled = Event()
+        self._writing_enabled.set()
         self._loop = asyncio.get_event_loop()
         self._last_sent = self._loop.time()
+
+    def pause_writing(self) -> None:
+        self._writing_enabled.clear()
+
+    def resume_writing(self) -> None:
+        self._writing_enabled.set()
 
     def connection_made(
         self, transport: asyncio.BaseTransport
@@ -916,21 +948,9 @@ class BaseProtocol(BufferedProtocol):
             buf = buf[self._bytes_read:]
         return buf
 
-    _packet_flags: Dict[PacketType, int] = {
-        PacketType.CONNACK: 0,
-        PacketType.UNSUBACK: 0,
-        PacketType.SUBACK: 0,
-        PacketType.PINGRESP: 0,
-        PacketType.PUBACK: 0,
-        PacketType.PUBREC: 0,
-        PacketType.PUBCOMP: 0,
-        PacketType.PUBREL: 2,
-        PacketType.DISCONNECT: 0,
-    }
-
     def verify_flags(self) -> None:
         """ Verify flag value. """
-        expected_flags = self._packet_flags.get(self._packet_type)
+        expected_flags = _packet_flags.get(self._packet_type)
         if expected_flags is None:
             return
         if self._flags != expected_flags:
@@ -960,16 +980,17 @@ class BaseProtocol(BufferedProtocol):
                 self.verify_flags()
 
                 # set up for reading remaining length
-                self._vb_int = VariableByteIntReader()
+                self._vb_int = variable_byte_int_reader()
                 msg_part_len = 1
             elif self._vb_int is not None:
                 # read remaining length
-                msg_part_len = self._vb_int.feed(self._standard_buf[msg_start])
+                msg_part_len = self._vb_int.send(self._buf[msg_start])
                 if msg_part_len is None:
                     # need another byte for remaining length
                     msg_part_len = 1
                 else:
                     # remaining length established, set up for content
+                    self._vb_int.close()
                     self._vb_int = None
                     if msg_part_len > self.STANDARD_BUF_SIZE:
                         # message longer that standard buf, allocate XL buf
@@ -1022,8 +1043,11 @@ class BaseProtocol(BufferedProtocol):
 
     async def write(self, data: bytes) -> None:
         """ Sends data to the server. """
-        if self._write_fut is not None:
-            await self._write_fut
+        await self._writing_enabled.wait()
+        self.write_nowait(data)
+
+    def write_nowait(self, data: bytes) -> None:
+        """ Sends data to the server without waiting. """
         if self._transport is None:
             return
         self._transport.write(data)

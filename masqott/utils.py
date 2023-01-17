@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: BSD-2-Clause
+
 """ Masqott utilities """
 
 from typing import Any

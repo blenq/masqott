@@ -9,20 +9,32 @@ else:
 from masqott import Client, ReasonCode
 
 
+version_string = f"{sys.version_info[0]}{sys.version_info[1]}"
+
+
 def get_from_env(arg_name, default):
     return os.environ.get("MQTTTEST" + arg_name.upper(), default)
 
 
-class BaseClientTestCase(IsolatedAsyncioTestCase):
+class GetClientMixin:
 
-    async def asyncSetUp(self) -> None:
+    async def get_client(self, client_id: str = "", **kwargs) -> Client:
+        if client_id:
+            client_id = f"{client_id}{version_string}"
         client = Client(
             get_from_env("host", "localhost"),
             int(get_from_env("port", "1883")),
-            client_id="test_client"
+            client_id=client_id,
+            **kwargs,
         )
         await client.connect()
-        self._cn = client
+        return client
+
+
+class BaseClientTestCase(GetClientMixin, IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self) -> None:
+        self._cn = await self.get_client("test_client")
 
     async def asyncTearDown(self) -> None:
-        await self._cn.disconnect()
+        await self._cn.close()

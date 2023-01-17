@@ -14,14 +14,12 @@ import socket
 from ssl import SSLContext
 import sys
 from typing import (
-    Any, Coroutine, Dict, List, NamedTuple, Optional, overload, Set, Tuple,
-    Union)
+    Any, Coroutine, Dict, List, Optional, overload, Set, Tuple, Union)
 
 from .base_protocol import (
-    BaseProtocol, PayloadFormat, Qos, MQTTVersion, PropertyID,
-    PacketType, MalformedPacket, MessagePacker, UnPacker, RetainHandling,
-    ReasonCode, MQTTException, ProtocolError, get_mqtt_ex, verify_reason_code,
-    default_packet_props,
+    BaseProtocol, PayloadFormat, Qos, MQTTVersion, PropertyID, PacketType,
+    MessagePacker, UnPacker, RetainHandling, ReasonCode, MQTTException,
+    get_mqtt_ex, verify_reason_code, default_packet_props,
 )
 from .utils import LogTextWrapper
 
@@ -100,7 +98,8 @@ class AppMessage:
 
     def __post_init__(self) -> None:
         if self.topic == "":
-            raise ProtocolError("Topic can not be empty.")
+            raise get_mqtt_ex(
+                ReasonCode.PROTOCOL_ERROR, "Topic can not be empty.")
         if isinstance(self.payload, str):
             self.raw_payload = self.payload.encode()
             if self.payload_format is None:
@@ -122,12 +121,6 @@ class AppMessage:
                 bool(self.expiry_interval.microseconds))
 
 
-class WillInfo(NamedTuple):
-    """ Will information """
-    message: AppMessage
-    delay_interval: int = 0
-
-
 # pylint: disable-next=too-many-arguments, too-many-locals, too-many-branches
 def make_connect_message(
         version: MQTTVersion,
@@ -145,10 +138,11 @@ def make_connect_message(
         user_props: Optional[UserProps],
         auth_method: Optional[str],
         auth_data: Optional[bytes],
-        will_info: Optional[WillInfo],
+        will_msg: Optional[AppMessage],
+        will_delay_interval: int,
 ) -> bytes:
     """ Creates a binary MQTT CONNECT message. """
-    packer = MessagePacker(PacketType.CONNECT, 0)
+    packer = MessagePacker(PacketType.CONNECT)
     packer.write_string("MQTT")  # protocol name
     version = MQTTVersion(version)
     packer.write_byte(version)  # protocol version
@@ -160,10 +154,10 @@ def make_connect_message(
         flags = 128
     if password is not None:
         flags += 64
-    if will_info is not None:
-        if will_info.message.retain:
+    if will_msg is not None:
+        if will_msg.retain:
             flags += 32
-        will_qos = Qos(will_info.message.qos)
+        will_qos = Qos(will_msg.qos)
         flags += will_qos * 8
         flags += 4
     if clean_start:
@@ -192,28 +186,25 @@ def make_connect_message(
     # client_id
     packer.write_string(client_id)
 
-    if will_info:
-        # will properties
+    if will_msg:
+        # write will message
         props = [
-            (PropertyID.WILL_DELAY_INTERVAL, will_info.delay_interval),
+            (PropertyID.WILL_DELAY_INTERVAL, will_delay_interval),
             (PropertyID.PAYLOAD_FORMAT_INDICATOR,
-             will_info.message.payload_format),
+             will_msg.payload_format),
             (PropertyID.MESSAGE_EXPIRY_INTERVAL,
-             will_info.message.expiry_interval),
-            (PropertyID.CONTENT_TYPE, will_info.message.content_type),
-            (PropertyID.RESPONSE_TOPIC, will_info.message.response_topic),
-            (PropertyID.CORRELATION_DATA, will_info.message.correlation_data),
+             will_msg.expiry_interval),
+            (PropertyID.CONTENT_TYPE, will_msg.content_type),
+            (PropertyID.RESPONSE_TOPIC, will_msg.response_topic),
+            (PropertyID.CORRELATION_DATA, will_msg.correlation_data),
         ]
-        if will_info.message.user_props:
+        if will_msg.user_props:
             props.extend([(
                 PropertyID.USER_PROPS, user_prop)
-                for user_prop in will_info.message.user_props])
+                for user_prop in will_msg.user_props])
         packer.write_props(props)
-
-        packer.write_string(will_info.message.topic)  # will topic
-
-        # will payload
-        packer.write_bytes(will_info.message.raw_payload)
+        packer.write_string(will_msg.topic)
+        packer.write_bytes(will_msg.raw_payload)
 
     # user
     if user is not None:
@@ -234,7 +225,7 @@ def make_subscribe_message(
         user_props: Optional[UserProps]
 ) -> bytes:
     """ Creates a binary MQTT SUBSCRIBE message. """
-    packer = MessagePacker(PacketType.SUBSCRIBE, 2)
+    packer = MessagePacker(PacketType.SUBSCRIBE)
 
     # packet identifier
     packer.write_int2(packet_id)
@@ -277,17 +268,17 @@ class ClientProtocol(BaseProtocol):
             msg_queue: 'Queue[AppMessage]',
     ) -> None:
         super().__init__()
-        self._client_id = ""
+        self.client_id = ""
         self._client = client
         self._msg_queue = msg_queue
         self._read_fut = self._loop.create_future()
         self._session_present = False
         self._status = ClientStatus.CLOSED
         self._packet_futs: Dict[int, 'Future[Any]'] = {}
-        self._packet_id_counter = 1
+        self._packet_id_counter = 0
         self._subs_counter = 0
         self._subscription_id_available = False
-        self._supports_wildcards = False
+        self.supports_wildcards = False
         self._server_topic_aliases: 'OrderedDict[str, int]' = OrderedDict()
         self._server_topic_alias_max = 0
         self._client_topic_aliases: Dict[int, str] = {}
@@ -303,16 +294,6 @@ class ClientProtocol(BaseProtocol):
         task = create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-
-    @property
-    def client_id(self) -> str:
-        """ Client identifier. """
-        return self._client_id
-
-    @property
-    def supports_wildcards(self) -> bool:
-        """ Indicates if the server supports wildcards. """
-        return self._supports_wildcards
 
     def connection_made(  # type: ignore[override]
             self, transport: Transport) -> None:
@@ -336,6 +317,12 @@ class ClientProtocol(BaseProtocol):
             self._ping_expired_handle.cancel()
             self._ping_expired_handle = None
 
+    def write_nowait(self, data: bytes) -> None:
+        if self._writing_enabled.is_set():
+            super().write_nowait(data)
+        else:
+            self._create_task(self.write(data))
+
     # pylint: disable-next=too-many-arguments, too-many-locals
     async def connect(
             self,
@@ -354,7 +341,8 @@ class ClientProtocol(BaseProtocol):
             user_props: Optional[UserProps],
             auth_method: Optional[str],
             auth_data: Optional[bytes],
-            will_info: Optional[WillInfo],
+            will_msg: Optional[AppMessage],
+            will_delay_interval: int,
     ) -> None:
         """ Connects the client protocol to the server. """
         if self._status is not ClientStatus.TCP_CONNECTED:
@@ -364,13 +352,13 @@ class ClientProtocol(BaseProtocol):
                 err_msg = "Client has invalid connection state."
             raise ValueError(err_msg)
 
-        self._client_id = client_id
+        self.client_id = client_id
 
         connect_msg = make_connect_message(
             version, client_id, user, password, clean_start, keep_alive,
             session_expiry_interval, receive_max, max_packet_size,
             topic_alias_max, request_response_info, request_problem_info,
-            user_props, auth_method, auth_data, will_info
+            user_props, auth_method, auth_data, will_msg, will_delay_interval,
         )
         self._client_topic_alias_max = topic_alias_max
         self._keep_alive = keep_alive
@@ -400,7 +388,8 @@ class ClientProtocol(BaseProtocol):
             # it SHOULD close the Network Connection to the Server."
             # It doesn't say what a reasonable time is. Use 5 seconds here.
             _logger.debug("> PINGREQ")
-            self._create_task(self.write(b'\xC0\0'))  # send PINGREQ
+            pingreq_msq = bytes(MessagePacker(PacketType.PINGREQ))
+            self.write_nowait(pingreq_msq)
             self._ping_expired_handle = self._loop.call_later(
                 5, self._ping_resp_expired)
             self._keep_alive_handle = None
@@ -430,27 +419,28 @@ class ClientProtocol(BaseProtocol):
 
         flags = unpacker.read_byte()
         if flags > 1:
-            raise MalformedPacket(
+            raise get_mqtt_ex(
                 ReasonCode.MALFORMED_PACKET, "Invalid connack flags.")
         self._session_present = bool(flags)
         reason_code = self.verify_reason_code(unpacker.read_byte())
         props = unpacker.read_props(PacketType.CONNACK)
 
         unpacker.check_end()
-        _logger.debug(
-            "< CONNACK: client_id=%s reason_code=%s", self._client_id,
-            reason_code.name)
 
         self._subscription_id_available = props[
             PropertyID.SUBSCRIPTION_ID_AVAILABLE]
-        self._supports_wildcards = props[PropertyID.SUPPORTS_WILDCARDS]
+        self.supports_wildcards = props[PropertyID.SUPPORTS_WILDCARDS]
         self._server_topic_alias_max = props[PropertyID.TOPIC_ALIAS_MAX]
         assigned_client_id = props[PropertyID.ASSIGNED_CLIENT_ID]
         if assigned_client_id is not None:
-            self._client_id = assigned_client_id
+            self.client_id = assigned_client_id
+
+        _logger.debug(
+            "< CONNACK: client_id=%s reason_code=%s", self.client_id,
+            reason_code.name)
 
         server_keep_alive = props[PropertyID.SERVER_KEEP_ALIVE]
-        if server_keep_alive:
+        if server_keep_alive is not None:
             self._keep_alive = server_keep_alive
         if self._keep_alive:
             self._keep_alive_handle = self._loop.call_at(
@@ -475,17 +465,12 @@ class ClientProtocol(BaseProtocol):
     def _get_packet_id(self) -> int:
         """ Gets a new packet id. """
         while True:
-            self._packet_id_counter += 1
             if self._packet_id_counter == 65535:
                 self._packet_id_counter = 1
+            else:
+                self._packet_id_counter += 1
             if self._packet_id_counter not in self._packet_futs:
                 return self._packet_id_counter
-        #
-        # while self._packet_id_counter in self._packet_futs:
-        #     self._packet_id_counter += 1
-        #     if self._packet_id_counter == 65535:
-        #         self._packet_id_counter = 1
-        # return self._packet_id_counter
 
     def _get_subscription_id(self) -> int:
         """ Get a new subscription id. """
@@ -513,10 +498,10 @@ class ClientProtocol(BaseProtocol):
         sub_fut = self._loop.create_future()
         self._packet_futs[packet_id] = sub_fut
         _logger.debug("> SUBSCRIBE: subs=%s packet_id=%s", sub_reqs, packet_id)
-        await self.write(sub_msg)
+        self.write_nowait(sub_msg)
         reason_codes: List[ReasonCode] = (await sub_fut)[0]
         if len(reason_codes) != len(sub_reqs):
-            raise ProtocolError(
+            raise get_mqtt_ex(
                 ReasonCode.PROTOCOL_ERROR,
                 "Wrong number of reason codes in SUBACK message.")
         ret_vals = []
@@ -572,7 +557,7 @@ class ClientProtocol(BaseProtocol):
     ) -> List[Union[ReasonCode, MQTTException]]:
         """ Unsubscribe from a list of topic filters. """
 
-        packer = MessagePacker(PacketType.UNSUBSCRIBE, 2)
+        packer = MessagePacker(PacketType.UNSUBSCRIBE)
 
         # packet identifier
         packet_id = self._get_packet_id()
@@ -585,10 +570,10 @@ class ClientProtocol(BaseProtocol):
         unsub_fut = self._loop.create_future()
         self._packet_futs[packet_id] = unsub_fut
         _logger.debug("> UNSUBSCRIBE: subs=%s packet_id=%s", topics, packet_id)
-        await self.write(unsub_msg)
+        self.write_nowait(unsub_msg)
         reason_codes = (await unsub_fut)[0]
         if len(reason_codes) != len(topics):
-            raise ProtocolError(
+            raise get_mqtt_ex(
                 ReasonCode.PROTOCOL_ERROR,
                 "Wrong number of reason codes in SUBACK message.")
         ret_vals: List[Union[ReasonCode, MQTTException]] = []
@@ -643,8 +628,10 @@ class ClientProtocol(BaseProtocol):
 
         packer.write_string(topic)
         if msg.qos > Qos.AT_MOST_ONCE:
-            # packet id will be filled later, write zero for now
-            packer.write_int2(0)
+            packet_id = self._get_packet_id()
+            packer.write_int2(packet_id)
+        else:
+            packet_id = None
         props: List[Tuple[PropertyID, Any]] = [
             (PropertyID.PAYLOAD_FORMAT_INDICATOR, msg.payload_format),
             (PropertyID.MESSAGE_EXPIRY_INTERVAL, msg.expiry_interval),
@@ -659,20 +646,17 @@ class ClientProtocol(BaseProtocol):
         packer.write_props(props)
         packer.write_raw_bytes(msg.raw_payload)
         msg_fut: Optional['Future[Tuple[ReasonCode, MessageProps]]']
-        if msg.qos is not Qos.AT_MOST_ONCE:
-            await self._outstanding.acquire()
+        if packet_id is not None:
             msg_fut = self._loop.create_future()
-            packet_id = self._get_packet_id()
             self._packet_futs[packet_id] = msg_fut
-            packer.vals[2] = packet_id
+            await self._outstanding.acquire()
         else:
-            packet_id = None
             msg_fut = None
         publish_msg = bytes(packer)
         _logger.debug(
-            "> PUBLISH: payload=%s packet_id=%s", LogTextWrapper(msg.payload),
-            packet_id)
-        await self.write(publish_msg)
+            "> PUBLISH: topic=%s payload=%s packet_id=%s", msg.topic,
+            LogTextWrapper(msg.payload), packet_id)
+        self.write_nowait(publish_msg)
         if msg_fut is None:
             return None
         return await msg_fut
@@ -739,7 +723,7 @@ class ClientProtocol(BaseProtocol):
             packet_id)
 
         if reason_code.is_success:
-            packer = MessagePacker(PacketType.PUBREL, 2)
+            packer = MessagePacker(PacketType.PUBREL)
             packer.write_int2(packet_id)
             if packet_id not in self._packet_futs:
                 reason_code = ReasonCode.PACKET_ID_NOT_FOUND
@@ -751,8 +735,10 @@ class ClientProtocol(BaseProtocol):
             _logger.debug(
                 "> PUBREL: reason_code=%s packet_id=%s", reason_code.name,
                 packet_id)
-            self._create_task(self.write(pubrel_msg))
+            self.write_nowait(pubrel_msg)
         else:
+            # An error occurred, a PUBCOMP message will not be sent by the
+            # server. Release and set the future now.
             fut = self._release_fut(packet_id)
             if fut is None or fut.done():
                 return
@@ -770,12 +756,12 @@ class ClientProtocol(BaseProtocol):
         try:
             qos = Qos(qos_val)
         except ValueError as ex:
-            raise MalformedPacket(
+            raise get_mqtt_ex(
                 ReasonCode.MALFORMED_PACKET, "Invalid QOS value.") from ex
         duplicate = bool(dup_val)
         if duplicate and qos is Qos.AT_MOST_ONCE:
-            raise ProtocolError(
-                ReasonCode.PROTOCOL_ERROR,
+            raise get_mqtt_ex(
+                ReasonCode.MALFORMED_PACKET,
                 "Duplicate flag can not be set for QOS level 0'.")
         return qos, bool(retain), duplicate
 
@@ -845,25 +831,23 @@ class ClientProtocol(BaseProtocol):
 
         msg, packet_id = self._get_publish_msg(unpacker)
         _logger.debug(
-            "< PUBLISH: payload=%s packet_id=%s", LogTextWrapper(msg.payload),
-            packet_id)
+            "< PUBLISH: topic=%s payload=%s packet_id=%s", msg.topic,
+            LogTextWrapper(msg.payload), packet_id)
         self._msg_queue.put_nowait(msg)
         if packet_id is None:
             return
         if msg.qos is Qos.AT_LEAST_ONCE:
-            packer = MessagePacker(PacketType.PUBACK, 0)
-            packer.write_int2(packet_id)
-            bin_msg = bytes(packer)
-            _logger.debug(
-                "> PUBACK: reason_code=SUCCESS packet_id=%s", packet_id)
-            self._create_task(self.write(bin_msg))
+            packet_type = PacketType.PUBACK
         else:
-            packer = MessagePacker(PacketType.PUBREC, 0)
-            packer.write_int2(packet_id)
-            bin_msg = bytes(packer)
-            _logger.debug(
-                "> PUBREC: reason_code=SUCCESS packet_id=%s", packet_id)
-            self._create_task(self.write(bin_msg))
+            packet_type = PacketType.PUBREC
+
+        packer = MessagePacker(packet_type)
+        packer.write_int2(packet_id)
+        bin_msg = bytes(packer)
+        _logger.debug(
+            "> %s: reason_code=SUCCESS packet_id=%s", packet_type.name,
+            packet_id)
+        self.write_nowait(bin_msg)
 
     def handle_pubrel_msg(self, unpacker: UnPacker) -> None:
         """ Handles an incoming PUBREL message from the server. """
@@ -882,11 +866,11 @@ class ClientProtocol(BaseProtocol):
             "< PUBREL: reason_code=%s packet_id=%s", reason_code.name,
             packet_id)
 
-        packer = MessagePacker(PacketType.PUBCOMP, 0)
+        packer = MessagePacker(PacketType.PUBCOMP)
         packer.write_int2(packet_id)
         pubcomp_msg = bytes(packer)
         _logger.debug("> PUBCOMP: reason_code=SUCCESS packet_id=%s", packet_id)
-        self._create_task(self.write(pubcomp_msg))
+        self.write_nowait(pubcomp_msg)
 
     def handle_disconnect_msg(self, unpacker: UnPacker) -> None:
         """ Handles an incoming DISCONNECT message from the server. """
@@ -926,7 +910,7 @@ class ClientProtocol(BaseProtocol):
             return
         if self._status is ClientStatus.CONNECTED:
             # send disconnect message
-            packer = MessagePacker(PacketType.DISCONNECT, 0)
+            packer = MessagePacker(PacketType.DISCONNECT)
             if reason_code is not ReasonCode.NORMAL_DISCONNECT:
                 packer.write_byte(reason_code)
                 packer.write_props([])
@@ -962,7 +946,7 @@ class ClientProtocol(BaseProtocol):
             if self._transport is None or self._transport.is_closing():
                 return
             if self._status is ClientStatus.CONNECTED:
-                packer = MessagePacker(PacketType.DISCONNECT, 0)
+                packer = MessagePacker(PacketType.DISCONNECT)
                 packer.write_byte(exc.reason_code)
                 packer.write_props([])
                 self._transport.write(bytes(packer))
@@ -974,9 +958,7 @@ class ClientProtocol(BaseProtocol):
 
 _has_ssl_shutdown_timeout = sys.version_info > (3, 11)
 
-
-SubscriptionRequestArg = Union[
-    str, SubscriptionRequest, Tuple[Any]]
+SubscriptionRequestArg = Union[str, SubscriptionRequest, Tuple[Any]]
 
 
 # pylint: disable-next=too-many-instance-attributes
@@ -1018,7 +1000,8 @@ class Client:
             user_props: Optional[UserProps] = None,
             auth_method: Optional[str] = None,
             auth_data: Optional[bytes] = None,
-            will_info: Optional[WillInfo] = None,
+            will_msg: Optional[AppMessage] = None,
+            will_delay_interval: int = 0,
     ):
         self._client_id = client_id
         self._host = host
@@ -1033,16 +1016,11 @@ class Client:
         }
         if _has_ssl_shutdown_timeout:
             self._conn_params["ssl_shutdown_timeout"] = ssl_shutdown_timeout
-        self._mqtt_params: Tuple[
-                MQTTVersion, str, Optional[str], Optional[Union[str, bytes]],
-                bool, int, int, int, Optional[int], int, bool, bool,
-                Optional[UserProps], Optional[str], Optional[bytes],
-                Optional[WillInfo]
-        ] = (
+        self._mqtt_params = (
             MQTTVersion.V5, client_id, user, password, clean_start,
             keep_alive, session_expiry_interval, receive_max, max_packet_size,
             topic_alias_max, request_response_info, request_problem_info,
-            user_props, auth_method, auth_data, will_info)
+            user_props, auth_method, auth_data, will_msg, will_delay_interval)
         self._loop = get_event_loop()
         self._protocol: Optional[ClientProtocol] = None
         self._msq_queue: 'Queue[AppMessage]' = Queue()
@@ -1156,7 +1134,7 @@ class Client:
             msg = AppMessage(topic, payload)
         return await self._protocol.publish(msg)
 
-    async def disconnect(self) -> None:
+    async def close(self) -> None:
         """ Disconnects the client. """
         if self._protocol is None:
             return
