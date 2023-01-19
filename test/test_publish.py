@@ -1,7 +1,8 @@
 import asyncio
+from datetime import timedelta
 
 import masqott.base_protocol
-from masqott import AppMessage, Qos, SubscriptionRequest
+from masqott import AppMessage, Qos, SubscriptionRequest, PayloadFormat
 
 from .setup_test import BaseClientTestCase, version_string
 
@@ -35,6 +36,21 @@ class PublishTestCase(BaseClientTestCase):
         await self._cn.publish((f"topic/{version_string}/test", payload))
         msg = await self._cn.get_message()
         self.assertEqual(payload, msg.payload)
+
+    async def test_binary_text_message(self):
+        await self._cn.subscribe(f"topic/{version_string}/#")
+
+        await self._cn.publish(AppMessage(
+            f"topic/{version_string}/test", "text",
+            payload_format=PayloadFormat.UNSPECIFIED))
+        msg = await self._cn.get_message()
+        self.assertEqual(b"text", msg.payload)
+
+        await self._cn.publish(AppMessage(
+            f"topic/{version_string}/test", b"text",
+            payload_format=PayloadFormat.TEXT))
+        msg = await self._cn.get_message()
+        self.assertEqual("text", msg.payload)
 
     async def test_user_props(self):
         await self._cn.subscribe(f"topic/{version_string}/#")
@@ -81,3 +97,19 @@ class PublishTestCase(BaseClientTestCase):
         msg = await self._cn.get_message()
         self.assertEqual(Qos.EXACTLY_ONCE, msg.qos)
 
+    async def test_msg_expiry_interval(self):
+        await self._cn.subscribe(
+            SubscriptionRequest(
+                f"topic/{version_string}/#", max_qos=Qos.EXACTLY_ONCE))
+        await self._cn.publish(AppMessage(
+            f"topic/{version_string}/test", "hello", qos=Qos.AT_MOST_ONCE,
+            expiry_interval=300
+        ))
+        msg = await self._cn.get_message()
+        self.assertLessEqual(msg.expiry_interval, 300)
+        await self._cn.publish(AppMessage(
+            f"topic/{version_string}/test", "hello", qos=Qos.AT_MOST_ONCE,
+            expiry_interval=timedelta(minutes=5)
+        ))
+        msg = await self._cn.get_message()
+        self.assertLessEqual(msg.expiry_interval, 300)

@@ -6,7 +6,7 @@ from asyncio import (
     TimerHandle, Task, Transport, wait_for)
 from codecs import decode
 from collections import OrderedDict
-from dataclasses import dataclass, field
+import dataclasses
 from datetime import timedelta
 import enum
 import logging
@@ -14,7 +14,8 @@ import socket
 from ssl import SSLContext
 import sys
 from typing import (
-    Any, Coroutine, Dict, List, Optional, overload, Set, Tuple, Union)
+    Any, Coroutine, Dict, Iterable, List, Optional, overload, Set, Tuple,
+    Union)
 
 from .base_protocol import (
     BaseProtocol, PayloadFormat, Qos, MQTTVersion, PropertyID, PacketType,
@@ -36,10 +37,10 @@ class ClientStatus(enum.IntEnum):
     CLOSING = 5
 
 
-UserProps = List[Tuple[str, str]]
+UserProps = Iterable[Tuple[str, str]]
 
 
-@dataclass
+@dataclasses.dataclass
 class SubscriptionRequest:
     """ Subscription request """
     topic_filter: str
@@ -58,7 +59,7 @@ class SubscriptionRequest:
         self.retain_handling = RetainHandling(self.retain_handling)
 
 
-@dataclass
+@dataclasses.dataclass
 class Subscription:
     """ Subscription """
 
@@ -75,31 +76,52 @@ class Subscription:
         return await self._client.unsubscribe(self.topic_filter)
 
 
-@dataclass
+if sys.version_info < (3, 10):
+
+    def field(
+            *,
+            default: Any = dataclasses.MISSING,
+            init: bool = True,
+            repr: bool = True,  # pylint: disable=redefined-builtin
+            compare: bool = True,
+            # pylint: disable-next=unused-argument
+            kw_only: Union[dataclasses._MISSING_TYPE, bool] =
+                dataclasses.MISSING) -> Any:
+        """ Proxy function to ignore kw_only argument. """
+        return dataclasses.field(
+            default=default, init=init, repr=repr, compare=compare)
+else:
+    field = dataclasses.field
+
+
+@dataclasses.dataclass
 # pylint: disable-next=too-many-instance-attributes
 class AppMessage:
     """ An application message. """
 
     topic: str
     payload: Union[bytes, memoryview, bytearray, str] = field(compare=False)
-    payload_format: Optional[PayloadFormat] = field(default=None, repr=False)
-    qos: Qos = field(repr=False, default=Qos.AT_MOST_ONCE)
+    qos: Qos = field(repr=False, default=Qos.AT_MOST_ONCE, kw_only=True)
+    payload_format: Optional[PayloadFormat] = field(
+        default=None, repr=False, kw_only=True)
     expiry_interval: Optional[Union[int, timedelta]] = field(
-        default=None, repr=False)
-    response_topic: Optional[str] = field(default=None, repr=False)
-    correlation_data: Optional[bytes] = field(default=None, repr=False)
-    user_props: Optional[UserProps] = field(default=None, repr=False)
-    subscription_id: Optional[int] = field(default=None, repr=False)
-    content_type: Optional[str] = field(default=None, repr=False)
-    retain: bool = field(default=False, repr=False)
-    duplicate: bool = field(default=False, repr=False)
+        default=None, repr=False, kw_only=True)
+    response_topic: Optional[str] = field(
+        default=None, repr=False, kw_only=True)
+    correlation_data: Optional[bytes] = field(
+        default=None, repr=False, kw_only=True)
+    user_props: Optional[UserProps] = field(
+        default=None, repr=False, kw_only=True)
+    subscription_id: Optional[List[int]] = field(
+        default=None, repr=False, kw_only=True)
+    content_type: Optional[str] = field(
+        default=None, repr=False, kw_only=True)
+    retain: bool = field(default=False, repr=False, kw_only=True)
+    duplicate: bool = field(default=False, repr=False, kw_only=True)
     raw_payload: Union[bytes, memoryview, bytearray] = field(
-        init=False, repr=False)
+        init=False, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
-        if self.topic == "":
-            raise get_mqtt_ex(
-                ReasonCode.PROTOCOL_ERROR, "Topic can not be empty.")
         if isinstance(self.payload, str):
             self.raw_payload = self.payload.encode()
             if self.payload_format is None:
@@ -107,11 +129,7 @@ class AppMessage:
         else:
             self.raw_payload = self.payload
             if self.payload_format is PayloadFormat.TEXT:
-                try:
-                    self.payload = decode(self.payload)
-                except UnicodeError as ex:
-                    raise get_mqtt_ex(
-                        ReasonCode.INVALID_PAYLOAD_FORMAT) from ex
+                self.payload = decode(self.payload)
             else:
                 self.payload_format = PayloadFormat.UNSPECIFIED
         if isinstance(self.expiry_interval, timedelta):
@@ -119,6 +137,8 @@ class AppMessage:
                 self.expiry_interval.days * 86400 +
                 self.expiry_interval.seconds +
                 bool(self.expiry_interval.microseconds))
+        if self.user_props is not None:
+            self.user_props = list(self.user_props)
 
 
 # pylint: disable-next=too-many-arguments, too-many-locals, too-many-branches
@@ -345,12 +365,6 @@ class ClientProtocol(BaseProtocol):
             will_delay_interval: int,
     ) -> None:
         """ Connects the client protocol to the server. """
-        if self._status is not ClientStatus.TCP_CONNECTED:
-            if self._status is ClientStatus.CONNECTED:
-                err_msg = "Client is already connected."
-            else:
-                err_msg = "Client has invalid connection state."
-            raise ValueError(err_msg)
 
         self.client_id = client_id
 
@@ -415,7 +429,8 @@ class ClientProtocol(BaseProtocol):
         """ Handles a CONNACK message from the server. """
 
         if self._status != ClientStatus.CONNECTING:
-            raise ValueError("Invalid message for state.")
+            raise get_mqtt_ex(
+                ReasonCode.PROTOCOL_ERROR, "Invalid message for state.")
 
         flags = unpacker.read_byte()
         if flags > 1:
@@ -457,10 +472,12 @@ class ClientProtocol(BaseProtocol):
             self._outstanding = Semaphore(server_max_receive)
             if not self._read_fut.done():
                 self._read_fut.set_result(None)
-        elif not self._read_fut.done():
-            reason_string = props[PropertyID.REASON_STRING]
-            self._read_fut.set_exception(
-                get_mqtt_ex(reason_code, reason_string))
+        else:
+            if not self._read_fut.done():
+                self._read_fut.set_exception(
+                    get_mqtt_ex(reason_code, props[PropertyID.REASON_STRING]))
+            if self._transport is not None:
+                self._transport.close()
 
     def _get_packet_id(self) -> int:
         """ Gets a new packet id. """
@@ -621,7 +638,7 @@ class ClientProtocol(BaseProtocol):
                         last=False)[1]
                 self._server_topic_aliases[topic] = topic_alias
             else:
-                # Topic alias is already known on server.
+                # Topic alias is already known on server
                 topic = ""
         else:
             topic_alias = None
@@ -808,22 +825,34 @@ class ClientProtocol(BaseProtocol):
         else:
             packet_id = None
         publish_props = unpacker.read_props(PacketType.PUBLISH)
-        payload = unpacker.read_remaining_bytes()
+        bin_payload = unpacker.read_remaining_bytes()
+        payload_format = publish_props[PropertyID.PAYLOAD_FORMAT_INDICATOR]
+        if payload_format is PayloadFormat.TEXT:
+            try:
+                payload: Union[str, bytes] = bin_payload.decode()
+            except UnicodeError as ex:
+                # pylint: disable-next=fixme
+                # TODO: send PUBREC, PUBACK with error code instead of raising
+                # and causing a DISCONNECT when qos permits.
+                raise get_mqtt_ex(ReasonCode.INVALID_PAYLOAD_FORMAT) from ex
+        else:
+            payload = bin_payload
+
         topic = self._handle_topic_alias(publish_props, topic)
 
         return AppMessage(
             topic,
             payload,
-            publish_props[PropertyID.PAYLOAD_FORMAT_INDICATOR],
-            qos,
-            publish_props[PropertyID.MESSAGE_EXPIRY_INTERVAL],
-            publish_props[PropertyID.RESPONSE_TOPIC],
-            publish_props[PropertyID.CORRELATION_DATA],
-            publish_props[PropertyID.USER_PROPS],
-            publish_props[PropertyID.SUBSCRIPTION_ID],
-            publish_props[PropertyID.CONTENT_TYPE],
-            retain,
-            duplicate
+            qos=qos,
+            payload_format=payload_format,
+            expiry_interval=publish_props[PropertyID.MESSAGE_EXPIRY_INTERVAL],
+            response_topic=publish_props[PropertyID.RESPONSE_TOPIC],
+            correlation_data=publish_props[PropertyID.CORRELATION_DATA],
+            user_props=publish_props[PropertyID.USER_PROPS],
+            subscription_id=publish_props[PropertyID.SUBSCRIPTION_ID],
+            content_type=publish_props[PropertyID.CONTENT_TYPE],
+            retain=retain,
+            duplicate=duplicate,
         ), packet_id
 
     def handle_publish_msg(self, unpacker: UnPacker) -> None:
@@ -1027,11 +1056,14 @@ class Client:
 
     async def connect(self) -> None:
         """ Connects to the server. """
-        self._protocol = (await self._loop.create_connection(
+        if self._protocol is not None:
+            raise ValueError("Client is already connected.")
+        protocol = (await self._loop.create_connection(
             self._create_protocol, self._host, self._port,
             **self._conn_params))[1]  # type: ignore
-        await self._protocol.connect(*self._mqtt_params)
-        self._client_id = self._protocol.client_id
+        await protocol.connect(*self._mqtt_params)
+        self._protocol = protocol
+        self._client_id = protocol.client_id
 
     def _create_protocol(self) -> ClientProtocol:
         return ClientProtocol(self, self._msq_queue)

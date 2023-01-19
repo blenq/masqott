@@ -13,6 +13,10 @@ class ConnCase(BaseClientTestCase):
     async def test_client_id(self):
         self.assertTrue(self._cn.client_id.startswith("test_client"))
 
+    async def test_already_connected(self):
+        with self.assertRaises(ValueError):
+            await self._cn.connect()
+
     async def test_closed_publish(self):
         await self._cn.close()
         with self.assertRaises(ValueError):
@@ -31,4 +35,8 @@ class ConnCase(BaseClientTestCase):
         cn = await self.get_client(user="user", password="password")
         await cn.close()
         cn = await self.get_client(user="user", password=b"password")
+        await cn.close()
+
+    async def test_conn_props(self):
+        cn = await self.get_client(user_props=[("name", "value")])
         await cn.close()
