@@ -29,6 +29,7 @@ version = "0.1"
 include-package-data = true
 packages = ['masqott']
 
+
 [tool.coverage.run]
 branch = true
 command_line = "-m unittest"

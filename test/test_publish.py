@@ -2,7 +2,10 @@ import asyncio
 from datetime import timedelta
 
 import masqott.base_protocol
-from masqott import AppMessage, Qos, SubscriptionRequest, PayloadFormat
+from masqott import (
+    AppMessage, Qos, SubscriptionRequest, PayloadFormat, MQTTException,
+    ReasonCode,
+)
 
 from .setup_test import BaseClientTestCase, version_string
 
@@ -113,3 +116,53 @@ class PublishTestCase(BaseClientTestCase):
         ))
         msg = await self._cn.get_message()
         self.assertLessEqual(msg.expiry_interval, 300)
+
+    async def test_sys_publish_qos1(self):
+        with self.assertRaises(MQTTException) as ctx:
+            await self._cn.publish(AppMessage(
+                f"$SYS", "hello", qos=Qos.AT_LEAST_ONCE))
+        self.assertIn(ctx.exception.reason_code, (
+            ReasonCode.PROTOCOL_ERROR, ReasonCode.NOT_AUTHORIZED))
+
+    async def test_sys_publish_qos2(self):
+        with self.assertRaises(MQTTException) as ctx:
+            await self._cn.publish(AppMessage(
+                f"$SYS", "hello", qos=Qos.EXACTLY_ONCE))
+        self.assertIn(ctx.exception.reason_code, (
+            ReasonCode.PROTOCOL_ERROR, ReasonCode.NOT_AUTHORIZED))
+
+    async def test_high_packet_id(self):
+        await self._cn.subscribe(f"topic/{version_string}")
+        self._cn._protocol._packet_id_counter = 65534
+        for i in range(2):
+            await self._cn.publish(AppMessage(
+                f"topic/{version_string}", f"hello {i}",
+                qos=Qos.AT_LEAST_ONCE))
+        for i in range(2):
+            msg = await self._cn.get_message()
+            self.assertEqual(msg.payload, f"hello {i}")
+        self.assertEqual(self._cn._protocol._packet_id_counter, 1)
+
+    async def test_existing_packet_id(self):
+        await self._cn.subscribe(f"topic/{version_string}")
+
+        async def publish(i):
+            self._cn._protocol._packet_id_counter = 0
+            await self._cn.publish(AppMessage(
+                f"topic/{version_string}", f"hello {i}",
+                qos=Qos.AT_LEAST_ONCE))
+
+        await asyncio.gather(*[publish(i) for i in range(100)])
+        msgs = set()
+        for i in range(100):
+            msgs.add((await self._cn.get_message()).payload)
+        self.assertEqual(len(msgs), 100)
+
+    # async def test_invalid_text(self):
+    #     # await self._cn.subscribe(f"topic/{version_string}")
+    #     msg = AppMessage(
+    #         f"topic/{version_string}", "hi", qos=Qos.AT_LEAST_ONCE)
+    #     msg.raw_payload = b'h\xe9'
+    #     await self._cn.publish(msg)
+    #     msg = await self._cn.get_message()
+    #     print(msg)

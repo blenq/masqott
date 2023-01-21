@@ -15,17 +15,32 @@ class SubscribeTestCase(BaseClientTestCase):
 
     async def test_subscribe(self):
         sub = await self._cn.subscribe(f"test/{version_string}/#")
-        await self._cn.publish((f"test/{version_string}", "first"))
+        await self._cn.publish(AppMessage(
+            f"test/{version_string}", "first", qos=Qos.AT_LEAST_ONCE))
         await self._cn.unsubscribe(f"test/{version_string}/#")
-        await self._cn.publish((f"test/{version_string}", "second"))
-        await self._cn.subscribe(f"test/{version_string}/#")
-        await self._cn.publish((f"test/{version_string}", "third"))
+        await self._cn.publish(AppMessage(
+            f"test/{version_string}", "second", qos=Qos.AT_LEAST_ONCE))
+        await self._cn.subscribe((f"test/{version_string}/#",))
+        await self._cn.publish(AppMessage(
+            f"test/{version_string}", "third", qos=Qos.AT_LEAST_ONCE))
         await self._cn.unsubscribe([f"test/{version_string}/#"])
         msg = await self._cn.get_message()
         self.assertEqual(msg.payload, "first")
         self.assertEqual(msg.subscription_id[0], sub.subscription_id)
         msg = await self._cn.get_message()
         self.assertEqual(msg.payload, "third")
+
+    async def test_closed_sub(self):
+        await self._cn.close()
+        with self.assertRaises(ValueError):
+            await self._cn.subscribe(f"test/{version_string}/#")
+
+    async def test_multi_sub(self):
+        subs = await self._cn.subscribe([
+            f"test/{version_string}/1", (f"test/{version_string}/2",)])
+        self.assertEqual(len(subs), 2)
+        with self.assertRaises(ValueError):
+            await self._cn.subscribe([])
 
     async def test_without_sub_id(self):
         # patch client
@@ -56,7 +71,8 @@ class SubscribeTestCase(BaseClientTestCase):
 
     async def test_subscription_unsubscribe(self):
         sub = await self._cn.subscribe(f"test/{version_string}/#")
-        await self._cn.publish((f"test/{version_string}", "first"))
+        await self._cn.publish(
+            AppMessage(f"test/{version_string}", "first", qos=1))
         res = await sub.unsubscribe()
         self.assertIs(res, ReasonCode.SUCCESS)
 
@@ -66,9 +82,11 @@ class SubscribeTestCase(BaseClientTestCase):
         self.assertIn(res, (
             ReasonCode.NO_SUBSCRIPTION_EXISTED, ReasonCode.SUCCESS))
 
-        await self._cn.publish(("test", "second"))
+        await self._cn.publish(AppMessage(
+            "test/{version_string}", "second", qos=Qos.AT_LEAST_ONCE))
         await self._cn.subscribe(f"test/{version_string}/#")
-        await self._cn.publish((f"test/{version_string}", "third"))
+        await self._cn.publish(AppMessage(
+            f"test/{version_string}", "third", qos=Qos.AT_LEAST_ONCE))
         msg = await self._cn.get_message()
         self.assertEqual(msg.payload, "first")
         msg = await self._cn.get_message()
